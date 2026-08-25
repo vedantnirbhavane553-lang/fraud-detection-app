@@ -2,43 +2,66 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
-import plotly.graph_objects as go
-from datetime import datetime
+import json
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    page_title="SentinelPay | Fraud Detection Operations",
+    page_title="CyberRisk Matrix | Anti-Fraud Console",
     page_icon="⚡",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# --- CUSTOM CSS (Clean FinTech Operations Theme) ---
+# --- DARK CYBER THEME CSS ---
 st.markdown("""
 <style>
-    .metric-card {
-        background: #f8f9fb;
-        border: 1px solid #e5e7eb;
-        border-radius: 10px;
-        padding: 16px;
-        margin-bottom: 12px;
+    /* Global Dark Theme Adjustments */
+    .stApp {
+        background-color: #0b0f19;
+        color: #e2e8f0;
     }
-    .badge-fraud {
-        background-color: #fee2e2;
-        color: #991b1b;
-        padding: 6px 12px;
-        border-radius: 20px;
+    
+    /* Cyber Card Container */
+    .cyber-card {
+        background: rgba(17, 24, 39, 0.7);
+        border: 1px solid #1f2937;
+        border-radius: 12px;
+        padding: 20px;
+        backdrop-filter: blur(10px);
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    }
+    
+    /* Terminal Console Display */
+    .terminal-box {
+        background-color: #030712;
+        border: 1px solid #374151;
+        border-radius: 8px;
+        padding: 12px;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 0.85rem;
+        color: #10b981;
+    }
+    
+    /* Status Badges */
+    .status-pill-red {
+        background-color: rgba(239, 68, 68, 0.2);
+        border: 1px solid #ef4444;
+        color: #f87171;
+        padding: 4px 14px;
+        border-radius: 9999px;
         font-weight: 700;
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         display: inline-block;
     }
-    .badge-clean {
-        background-color: #dcfce7;
-        color: #166534;
-        padding: 6px 12px;
-        border-radius: 20px;
+    
+    .status-pill-green {
+        background-color: rgba(16, 185, 129, 0.2);
+        border: 1px solid #10b981;
+        color: #34d399;
+        padding: 4px 14px;
+        border-radius: 9999px;
         font-weight: 700;
-        font-size: 0.9rem;
+        font-size: 0.85rem;
         display: inline-block;
     }
 </style>
@@ -46,80 +69,119 @@ st.markdown("""
 
 # --- MODEL LOADER ---
 @st.cache_resource
-def get_model():
+def load_fraud_model():
     try:
         return joblib.load("fraud_detection_random_forest.pkl")
     except Exception:
         return None
 
-model = get_model()
+model = load_fraud_model()
 
-# --- SESSION STATE INITIALIZATION ---
-if "history" not in st.session_state:
-    st.session_state.history = []
+# --- PRESET SCENARIOS ---
+SCENARIOS = {
+    "Manual Input": None,
+    "🚨 Account Drain Attack (Transfer)": {
+        "type": "TRANSFER",
+        "amount": 250000.0,
+        "old_org": 250000.0,
+        "new_org": 0.0,
+        "old_dest": 0.0,
+        "new_dest": 250000.0
+    },
+    "🚨 Rapid Cash-Out Exploit": {
+        "type": "CASH_OUT",
+        "amount": 85000.0,
+        "old_org": 85000.0,
+        "new_org": 0.0,
+        "old_dest": 1200.0,
+        "new_dest": 86200.0
+    },
+    "✅ Standard Merchant Payment": {
+        "type": "PAYMENT",
+        "amount": 120.50,
+        "old_org": 4200.0,
+        "new_org": 4079.50,
+        "old_dest": 0.0,
+        "new_dest": 0.0
+    },
+    "✅ Standard Account Cash-In": {
+        "type": "CASH_IN",
+        "amount": 1500.0,
+        "old_org": 500.0,
+        "new_org": 2000.0,
+        "old_dest": 20000.0,
+        "new_dest": 18500.0
+    }
+}
 
-# --- HEADER BAR ---
-head_col1, head_col2 = st.columns([3, 1])
-with head_col1:
-    st.title("⚡ SentinelPay Operations Console")
-    st.caption("Real-Time Behavioral Fraud Engine & Transaction Risk Scoring")
-with head_col2:
-    st.markdown("<div style='text-align: right; margin-top: 15px;'>", unsafe_allow_html=True)
+# --- HEADER ---
+col_head1, col_head2 = st.columns([3, 1])
+with col_head1:
+    st.markdown("## 🛡️ THREAT-INTEL // FRAUD INVESTIGATION MATRIX")
+    st.caption("Deep-packet behavioral analysis & automated anomaly classification")
+with col_head2:
     if model is not None:
-        st.success("🟢 ML Pipeline Active")
+        st.markdown("<span class='status-pill-green'>● SYSTEM ONLINE</span>", unsafe_allow_html=True)
     else:
-        st.error("🔴 Model Offline (Demo Mode)")
-    st.markdown("</div>", unsafe_allow_html=True)
+        st.markdown("<span class='status-pill-red'>▲ MODEL OFFLINE (SIMULATION)</span>", unsafe_allow_html=True)
 
-st.divider()
+st.markdown("---")
 
-# --- 3-COLUMN DASHBOARD LAYOUT ---
-col_input, col_viz, col_history = st.columns([1.2, 1.2, 1], gap="large")
+# --- SCENARIO SELECTOR PRESET BAR ---
+st.markdown("##### ⚡ Quick-Load Test Vectors")
+preset_choice = st.selectbox(
+    "Select a pre-configured behavioral profile to autofill values:",
+    options=list(SCENARIOS.keys())
+)
 
-# ==========================================
-# COLUMN 1: INTERACTIVE TRANSACTION CREATOR
-# ==========================================
-with col_input:
-    st.subheader("1. Transaction Form")
+current_scenario = SCENARIOS[preset_choice]
+
+# Default values based on preset
+default_type = current_scenario["type"] if current_scenario else "TRANSFER"
+default_amt = current_scenario["amount"] if current_scenario else 50000.0
+default_old_org = current_scenario["old_org"] if current_scenario else 50000.0
+default_new_org = current_scenario["new_org"] if current_scenario else 0.0
+default_old_dest = current_scenario["old_dest"] if current_scenario else 0.0
+default_new_dest = current_scenario["new_dest"] if current_scenario else 50000.0
+
+# --- MAIN INVESTIGATION CONSOLE ---
+col_left, col_right = st.columns([1.1, 1], gap="medium")
+
+# LEFT PANEL: Parameters
+with col_left:
+    st.markdown("### 📥 Transaction Telemetry")
     
     with st.container(border=True):
-        tx_type = st.selectbox(
-            "Transaction Type",
-            ["TRANSFER", "CASH_OUT", "PAYMENT", "DEBIT", "CASH_IN"],
-            help="High-risk types typically include TRANSFER and CASH_OUT."
-        )
-        amount = st.number_input("Amount ($)", min_value=0.01, value=15000.0, step=500.0)
-        
-        st.markdown("**Origin Account (Sender)**")
-        c1, c2 = st.columns(2)
-        with c1:
-            old_org = st.number_input("Old Balance", value=15000.0, step=500.0, key="orig_old")
-        with c2:
-            new_org = st.number_input("New Balance", value=0.0, step=500.0, key="orig_new")
+        t1, t2 = st.columns([1, 1])
+        with t1:
+            type_options = ["TRANSFER", "CASH_OUT", "PAYMENT", "DEBIT", "CASH_IN"]
+            type_idx = type_options.index(default_type) if default_type in type_options else 0
+            tx_type = st.selectbox("Protocol (Type)", type_options, index=type_idx)
+        with t2:
+            amount = st.number_input("Payload Amount ($)", min_value=0.01, value=float(default_amt), step=1000.0)
 
-        st.markdown("**Destination Account (Receiver)**")
-        c3, c4 = st.columns(2)
-        with c3:
-            old_dest = st.number_input("Old Balance", value=0.0, step=500.0, key="dest_old")
-        with c4:
-            new_dest = st.number_input("New Balance", value=15000.0, step=500.0, key="dest_new")
+        st.markdown("##### Origin Node (Sender Ledger)")
+        o1, o2 = st.columns(2)
+        with o1:
+            old_org = st.number_input("Pre-Balance", value=float(default_old_org), step=1000.0, key="orig_old_val")
+        with o2:
+            new_org = st.number_input("Post-Balance", value=float(default_new_org), step=1000.0, key="orig_new_val")
 
-        # Quick Math Audit
-        org_diff = old_org - new_org
-        discrepancy = org_diff - amount
-        if abs(discrepancy) > 0.01 and tx_type in ["TRANSFER", "CASH_OUT"]:
-            st.warning(f"⚠️ Sender balance delta (${org_diff:,.2f}) does not match amount (${amount:,.2f})")
+        st.markdown("##### Target Node (Destination Ledger)")
+        d1, d2 = st.columns(2)
+        with d1:
+            old_dest = st.number_input("Pre-Balance", value=float(default_old_dest), step=1000.0, key="dest_old_val")
+        with d2:
+            new_dest = st.number_input("Post-Balance", value=float(default_new_dest), step=1000.0, key="dest_new_val")
 
-        eval_btn = st.button("Score Transaction", type="primary", use_container_width=True)
+    run_analysis = st.button("RUN FORENSIC CLASSIFIER", type="primary", use_container_width=True)
 
-# ==========================================
-# COLUMN 2: RISK GAUGES & SCORECARD
-# ==========================================
-with col_viz:
-    st.subheader("2. AI Risk Evaluation")
+# RIGHT PANEL: Evaluation & Risk Breakdown
+with col_right:
+    st.markdown("### 🧠 Threat Evaluation Matrix")
     
-    # Feature Vector Preprocessing
-    features = pd.DataFrame([{
+    # Construct input dataframe
+    input_vector = pd.DataFrame([{
         'step': 1,
         'amount': amount,
         'oldbalanceOrg': old_org,
@@ -132,72 +194,39 @@ with col_viz:
         'type_TRANSFER': 1 if tx_type == "TRANSFER" else 0
     }])
 
-    # Fallback simulation if model file is missing
+    # Model inference or fallback heuristic
     if model is not None:
-        prediction = model.predict(features)[0]
-        prob = model.predict_proba(features)[0][1] if hasattr(model, "predict_proba") else (0.95 if prediction == 1 else 0.05)
+        prediction = model.predict(input_vector)[0]
+        prob = model.predict_proba(input_vector)[0][1] if hasattr(model, "predict_proba") else (0.95 if prediction == 1 else 0.05)
     else:
-        # Simple heuristic fallback for previewing UI without pkl
-        prob = 0.92 if (tx_type in ["TRANSFER", "CASH_OUT"] and new_org == 0 and amount >= 10000) else 0.08
-        prediction = 1 if prob >= 0.5 else 0
+        # Behavioral heuristic logic for demonstration
+        is_high_risk_type = tx_type in ["TRANSFER", "CASH_OUT"]
+        is_drained = (old_org > 0 and new_org == 0)
+        prob = 0.94 if (is_high_risk_type and is_drained) else 0.04
+        prediction = 1 if prob >= 0.50 else 0
 
-    # Record to history when button is clicked
-    if eval_btn:
-        st.session_state.history.insert(0, {
-            "Time": datetime.now().strftime("%H:%M:%S"),
-            "Type": tx_type,
-            "Amount": f"${amount:,.0f}",
-            "Score": f"{prob*100:.1f}%",
-            "Verdict": "FRAUD" if prediction == 1 else "CLEAN"
-        })
-
-    # Plotly Gauge Indicator
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number",
-        value=prob * 100,
-        title={'text': "Risk Probability Index", 'font': {'size': 16}},
-        number={'suffix': "%", 'font': {'size': 32}},
-        gauge={
-            'axis': {'range': [0, 100]},
-            'bar': {'color': "#1e293b"},
-            'steps': [
-                {'range': [0, 30], 'color': "#86efac"},
-                {'range': [30, 70], 'color': "#fde047"},
-                {'range': [70, 100], 'color': "#fca5a5"}
-            ],
-            'threshold': {
-                'line': {'color': "red", 'width': 4},
-                'thickness': 0.75,
-                'value': 70
-            }
-        }
-    ))
-    fig.update_layout(margin=dict(l=20, r=20, t=40, b=20), height=220)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Decision Card
     with st.container(border=True):
-        if prediction == 1:
-            st.markdown('<span class="badge-fraud">⚠️ ACTION REQUIRED: FRAUD SUSPECTED</span>', unsafe_allow_html=True)
-            st.markdown(f"**Policy Trigger:** Flagged by RF Classifier with **{prob*100:.1f}%** certainty.")
-        else:
-            st.markdown('<span class="badge-clean">✅ PASSED: TRANSACTION LEGITIMATE</span>', unsafe_allow_html=True)
-            st.markdown(f"**Policy Trigger:** Clean behavioral signature (**{(1-prob)*100:.1f}%** normal).")
+        res_header, res_badge = st.columns([2, 1])
+        with res_header:
+            st.markdown(f"**Anomaly Confidence Score:** `{prob * 100:.2f}%`")
+        with res_badge:
+            if prediction == 1:
+                st.markdown("<span class='status-pill-red'>THREAT DETECTED</span>", unsafe_allow_html=True)
+            else:
+                st.markdown("<span class='status-pill-green'>CLEAN SIGNATURE</span>", unsafe_allow_html=True)
 
-# ==========================================
-# COLUMN 3: RUNNING AUDIT LOG / SESSION FEED
-# ==========================================
-with col_history:
-    st.subheader("3. Audit Session Log")
-    if st.session_state.history:
-        history_df = pd.DataFrame(st.session_state.history)
-        st.dataframe(
-            history_df,
-            hide_index=True,
-            use_container_width=True
-        )
-        if st.button("Clear Log", use_container_width=True):
-            st.session_state.history = []
-            st.rerun()
-    else:
-        st.info("No transactions scored in this session yet. Run a prediction to populate.")
+        st.progress(float(prob))
+
+        # Risk Vector Heuristic Breakdown
+        st.markdown("##### 🔬 Signal Attribution Checklist")
+        c_drain = "🔴" if (old_org > 0 and new_org == 0) else "🟢"
+        c_type = "🔴" if tx_type in ["TRANSFER", "CASH_OUT"] else "🟢"
+        c_amt = "🟡" if amount > 50000 else "🟢"
+
+        st.markdown(f"{c_type} **Transaction Vector:** `{tx_type}` {'(High Risk Protocol)' if tx_type in ['TRANSFER', 'CASH_OUT'] else '(Standard Protocol)'}")
+        st.markdown(f"{c_drain} **Sender Liquidation:** {'Account 100% drained to 0 balance' if (old_org > 0 and new_org == 0) else 'Normal account balance delta'}")
+        st.markdown(f"{c_amt} **Exposure Magnitude:** ${amount:,.2f}")
+
+    # Collapsible Raw Inspection Box
+    with st.expander("🛠️ Raw Telemetry JSON Payload"):
+        st.code(json.dumps(input_vector.to_dict(orient="records")[0], indent=2), language="json")
