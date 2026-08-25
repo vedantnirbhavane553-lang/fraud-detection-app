@@ -1,202 +1,113 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-import joblib
-import plotly.graph_objects as go
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(
-    page_title="Model Benchmark | Fraud Ensemble",
-    page_icon="⚖️",
-    layout="wide"
+def score_transactions(data: pd.DataFrame) -> pd.DataFrame:
+    """Apply an intentionally simple, explainable demo risk score (0–100)."""
+    frame = data.copy()
+    for col, default in {"amount": 0, "device_new": False, "failed_attempts": 0, "country": "Unknown"}.items():
+        if col not in frame:
+            frame[col] = default
+    amount = pd.to_numeric(frame["amount"], errors="coerce").fillna(0)
+    score = (amount > 250).astype(int) * 28 + (amount > 750).astype(int) * 20
+    score += frame["device_new"].astype(bool).astype(int) * 22
+    score += pd.to_numeric(frame["failed_attempts"], errors="coerce").fillna(0).clip(0, 4) * 9
+    score += frame["country"].isin(["United States", "UAE"]).astype(int) * 8
+    frame["risk_score"] = score.clip(0, 100).astype(int)
+    frame["risk_level"] = pd.cut(
+        frame["risk_score"], bins=[-1, 29, 59, 100], labels=["Low", "Medium", "High"]
+    ).astype(str)
+    return frame
+
+
+def metric_card(label: str, value: str, delta: str = "") -> None:
+    st.markdown(
+        f'<div class="metric-card"><div class="metric-label">{label}</div>'
+        f'<div class="metric-value">{value}</div><div class="metric-delta">{delta}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def load_transactions(uploaded_file) -> pd.DataFrame:
+    if uploaded_file is None:
+        return sample_transactions()
+    raw = pd.read_csv(uploaded_file)
+    raw.columns = [c.strip().lower().replace(" ", "_") for c in raw.columns]
+    if "transaction_id" not in raw:
+        raw["transaction_id"] = [f"UPLOAD-{i + 1}" for i in range(len(raw))]
+    return score_transactions(raw)
+
+
+inject_css()
+
+with st.sidebar:
+    st.markdown("## 🛡️ FraudShield")
+    st.caption("INTELLIGENCE CONSOLE")
+    st.divider()
+    page = st.radio("Navigate", ["Overview", "Transaction review", "Risk insights"], label_visibility="collapsed")
+    st.divider()
+    uploaded = st.file_uploader("Upload transactions (.csv)", type="csv")
+    st.caption("Expected fields: amount, country, device_new, failed_attempts.")
+    st.divider()
+    st.caption("MODEL STATUS")
+    st.success("Monitoring active")
+
+transactions = load_transactions(uploaded)
+high_risk = transactions[transactions.risk_level == "High"]
+total_amount = pd.to_numeric(transactions.amount, errors="coerce").fillna(0).sum()
+
+st.markdown(
+    '<div class="hero"><h1>Fraud operations, made clear.</h1>'
+    '<p>Review risk signals, prioritize alerts, and protect every transaction.</p></div>',
+    unsafe_allow_html=True,
 )
 
-# --- CACHED MODEL LOADER ---
-@st.cache_resource
-def load_all_models():
-    models = {}
-    model_files = {
-        "Random Forest": "fraud_detection_random_forest.pkl",
-        "XGBoost": "fraud_detection_xgboost.pkl",
-        "Logistic Regression": "fraud_detection_logistic_regression.pkl"
-    }
-    
-    for name, path in model_files.items():
-        try:
-            models[name] = joblib.load(path)
-        except Exception:
-            models[name] = None
-    return models
+if page == "Overview":
+    a, b, c, d = st.columns(4)
+    with a: metric_card("Transactions monitored", f"{len(transactions):,}", "Live demo feed")
+    with b: metric_card("High-risk alerts", f"{len(high_risk):,}", "Needs review")
+    with c: metric_card("Exposure flagged", f"${high_risk.amount.sum():,.0f}", "Potentially at risk")
+    with d: metric_card("Total volume", f"${total_amount:,.0f}", "All transactions")
 
-loaded_models = load_all_models()
+    left, right = st.columns([1.35, 1])
+    with left:
+        st.markdown('<div class="section-title">Risk activity</div>', unsafe_allow_html=True)
+        activity = transactions.copy()
+        activity["date"] = pd.to_datetime(activity.get("timestamp", pd.Timestamp.now())).dt.date
+        chart = activity.groupby(["date", "risk_level"]).size().unstack(fill_value=0)
+        st.area_chart(chart, color=["#7dd3a8", "#f5c95c", "#ec6b6b"])
+    with right:
+        st.markdown('<div class="section-title">Risk distribution</div>', unsafe_allow_html=True)
+        counts = transactions.risk_level.value_counts().reindex(["Low", "Medium", "High"], fill_value=0)
+        st.bar_chart(counts, color="#315f90")
 
-# --- HEADER SECTION ---
-st.title("⚖️ Multi-Model Fraud Consensus & Benchmarking")
-st.caption("Compare individual classifier predictions, probabilities, and model consensus in real time.")
+    st.markdown('<div class="section-title">Priority alerts</div>', unsafe_allow_html=True)
+    view = high_risk.sort_values("risk_score", ascending=False).head(8)
+    st.dataframe(view[["transaction_id", "merchant", "amount", "country", "risk_score", "risk_level"]], hide_index=True, use_container_width=True)
 
-# Model status ribbon
-st.markdown("##### Model Pipeline Status")
-st_cols = st.columns(3)
-for col, (m_name, m_obj) in zip(st_cols, loaded_models.items()):
-    with col:
-        if m_obj is not None:
-            st.success(f"🟢 **{m_name}**: Online")
-        else:
-            st.warning(f"🟡 **{m_name}**: Mock Simulation")
+elif page == "Transaction review":
+    st.markdown('<div class="section-title">Transaction review queue</div>', unsafe_allow_html=True)
+    f1, f2, f3 = st.columns([1, 1, 2])
+    with f1: level = st.multiselect("Risk level", ["Low", "Medium", "High"], default=["High", "Medium"])
+    with f2: minimum = st.number_input("Minimum score", 0, 100, 30)
+    with f3: query = st.text_input("Search merchant, country, or transaction ID")
+    reviewed = transactions[transactions.risk_level.isin(level) & (transactions.risk_score >= minimum)].copy()
+    if query:
+        mask = reviewed.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)
+        reviewed = reviewed[mask]
+    st.dataframe(reviewed.sort_values("risk_score", ascending=False), hide_index=True, use_container_width=True, height=520)
+    st.download_button("Download filtered results", reviewed.to_csv(index=False), "fraud_review_queue.csv", "text/csv")
 
-st.divider()
+else:
+    st.markdown('<div class="section-title">What drives risk?</div>', unsafe_allow_html=True)
+    x, y = st.columns([1.1, 1])
+    with x:
+        st.markdown("""**Demo scoring signals**
 
-# --- LAYOUT: INPUT FORM & COMPARISON RESULTS ---
-col_input, col_results = st.columns([1, 1.4], gap="large")
+        - Large transaction amounts
+        - First-time device usage
+        - Repeated failed attempts
+        - Selected cross-border activity
 
-# ==========================================
-# LEFT PANEL: TRANSACTION INPUTS
-# ==========================================
-with col_input:
-    st.subheader("1. Transaction Parameters")
-    
-    with st.container(border=True):
-        tx_type = st.selectbox(
-            "Transaction Type",
-            ["TRANSFER", "CASH_OUT", "PAYMENT", "DEBIT", "CASH_IN"],
-            index=0
-        )
-        amount = st.number_input("Amount ($)", min_value=0.01, value=125000.0, step=1000.0)
-        
-        st.markdown("**Origin Node (Sender)**")
-        c1, c2 = st.columns(2)
-        with c1:
-            old_org = st.number_input("Sender Old Balance", value=125000.0, step=1000.0)
-        with c2:
-            new_org = st.number_input("Sender New Balance", value=0.0, step=1000.0)
-
-        st.markdown("**Target Node (Receiver)**")
-        c3, c4 = st.columns(2)
-        with c3:
-            old_dest = st.number_input("Receiver Old Balance", value=0.0, step=1000.0)
-        with c4:
-            new_dest = st.number_input("Receiver New Balance", value=125000.0, step=1000.0)
-
-    # Threshold config
-    with st.expander("⚙️ Decision Thresholds & Weights"):
-        fraud_threshold = st.slider("Classification Risk Cutoff", min_value=0.1, max_value=0.9, value=0.5, step=0.05)
-        st.caption("Transactions with an ensemble probability above this threshold are classified as FRAUD.")
-
-# ==========================================
-# RIGHT PANEL: MODEL BENCHMARK & CONSENSUS
-# ==========================================
-with col_results:
-    st.subheader("2. Multi-Model Benchmark")
-
-    # Construct input feature row
-    features = pd.DataFrame([{
-        'step': 1,
-        'amount': amount,
-        'oldbalanceOrg': old_org,
-        'newbalanceOrig': new_org,
-        'oldbalanceDest': old_dest,
-        'newbalanceDest': new_dest,
-        'type_CASH_OUT': 1 if tx_type == "CASH_OUT" else 0,
-        'type_DEBIT': 1 if tx_type == "DEBIT" else 0,
-        'type_PAYMENT': 1 if tx_type == "PAYMENT" else 0,
-        'type_TRANSFER': 1 if tx_type == "TRANSFER" else 0
-    }])
-
-    # Collect individual model outputs
-    results = {}
-    
-    # Mock behavioral fallback function if specific model files are absent
-    def mock_predict(model_name, features_df):
-        # Heuristic simulation for previewing when pkl files are missing
-        is_drained = (old_org > 0 and new_org == 0)
-        is_transfer = (tx_type in ["TRANSFER", "CASH_OUT"])
-        
-        if model_name == "Random Forest":
-            return (0.94 if (is_transfer and is_drained) else 0.04)
-        elif model_name == "XGBoost":
-            return (0.98 if (is_transfer and is_drained) else 0.02)
-        else: # Logistic Regression
-            return (0.82 if (is_transfer and is_drained) else 0.12)
-
-    for name, m_obj in loaded_models.items():
-        if m_obj is not None:
-            if hasattr(m_obj, "predict_proba"):
-                prob = m_obj.predict_proba(features)[0][1]
-            else:
-                prob = float(m_obj.predict(features)[0])
-        else:
-            prob = mock_predict(name, features)
-        
-        pred = 1 if prob >= fraud_threshold else 0
-        results[name] = {"probability": prob, "prediction": pred}
-
-    # Display side-by-side metric cards
-    m_col1, m_col2, m_col3 = st.columns(3)
-    card_cols = [m_col1, m_col2, m_col3]
-
-    for col, (name, res) in zip(card_cols, results.items()):
-        with col:
-            with st.container(border=True):
-                st.markdown(f"**{name}**")
-                score_pct = res["probability"] * 100
-                st.metric("Fraud Risk", f"{score_pct:.1f}%")
-                if res["prediction"] == 1:
-                    st.error("🚨 FRAUD")
-                else:
-                    st.success("✅ CLEAN")
-
-    # Calculate Ensemble Metrics
-    avg_probability = np.mean([r["probability"] for r in results.values()])
-    fraud_votes = sum([r["prediction"] for r in results.values()])
-    total_models = len(results)
-
-    st.markdown("---")
-    
-    # Consensus summary box
-    with st.container(border=True):
-        c_left, c_right = st.columns([1.5, 1])
-        with c_left:
-            st.markdown("#### 🛡️ Ensemble Consensus Verdict")
-            if fraud_votes >= 2: # Majority vote (2 out of 3)
-                st.error(f"### 🚨 HIGH RISK: FLAGGED AS FRAUD ({fraud_votes}/{total_models} Models Agreed)")
-                st.write(f"Mean ensemble risk score is **{avg_probability*100:.1f}%**, exceeding the safety threshold.")
-            else:
-                st.success(f"### ✅ LOW RISK: TRANSACTION APPROVED ({total_models - fraud_votes}/{total_models} Models Agreed)")
-                st.write(f"Mean ensemble risk score is **{avg_probability*100:.1f}%**, within standard limits.")
-
-        with c_right:
-            st.metric("Mean Ensemble Probability", f"{avg_probability * 100:.1f}%")
-            st.progress(float(avg_probability))
-
-    # Comparative Plotly Bar Chart
-    model_names = list(results.keys())
-    probabilities = [results[m]["probability"] * 100 for m in model_names]
-    bar_colors = ['#ef4444' if p >= (fraud_threshold * 100) else '#10b981' for p in probabilities]
-
-    fig = go.Figure()
-    fig.add_trace(go.Bar(
-        x=model_names,
-        y=probabilities,
-        text=[f"{p:.1f}%" for p in probabilities],
-        textposition='auto',
-        marker_color=bar_colors,
-        width=0.4
-    ))
-
-    fig.add_hline(
-        y=fraud_threshold * 100, 
-        line_dash="dash", 
-        line_color="#f59e0b",
-        annotation_text=f"Cutoff Threshold ({fraud_threshold*100:.0f}%)",
-        annotation_position="bottom right"
-    )
-
-    fig.update_layout(
-        title="Model Probability Comparison",
-        yaxis=dict(title="Fraud Probability (%)", range=[0, 100]),
-        xaxis=dict(title=""),
-        height=280,
-        margin=dict(l=20, r=20, t=40, b=20)
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
+        The app exposes these signals so every review decision can be understood.""")
+    with y:
+        signals = pd.DataFrame({"Signal": ["Large amount", "New device", "Failed attempts", "Cross-border"], "Weight": [48, 22, 36, 8]})
+        st.bar_chart(signals.set_index("Signal"), color="#e9814a")
+    st.info("This dashboard uses a transparent rules-based score for demonstration. Replace `score_transactions()` with your trained model when it is ready.")
