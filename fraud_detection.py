@@ -1,212 +1,111 @@
-import streamlit as st
-import pandas as pd
+"""Fraud Detection Prediction App.
+
+Run locally:
+    python -m streamlit run app.py
+"""
+
+import json
+from pathlib import Path
+
 import joblib
-from datetime import datetime
+import pandas as pd
+import streamlit as st
 
-# --- PAGE CONFIG ---
-st.set_page_config(
-    page_title="Fraud Desk | Analyst Case Manager",
-    page_icon="💼",
-    layout="wide"
-)
+from features import build_features
 
-# --- LOAD MODEL SAFELY ---
-@st.cache_resource
-def load_fraud_model():
-    try:
-        return joblib.load("fraud_detection_random_forest.pkl")
-    except Exception:
-        return None
+BASE = Path(__file__).parent
+NEW_MODEL, NEW_META = BASE / "fraud_model.pkl", BASE / "model_meta.json"
+OLD_MODEL = BASE / "fraud_detection_random_forest.pkl"
+LEGACY_THRESHOLD = 0.928  # from the original notebook (it was tuned on the test set)
 
-model = load_fraud_model()
+TRANSACTION_TYPES = ["PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"]
 
-# --- INITIALIZE MOCK CASE QUEUE ---
-if "cases" not in st.session_state:
-    st.session_state.cases = [
-        {
-            "case_id": "TX-9021",
-            "timestamp": "2026-08-25 14:22:10",
-            "type": "TRANSFER",
-            "amount": 185000.0,
-            "oldbalanceOrg": 185000.0,
-            "newbalanceOrig": 0.0,
-            "oldbalanceDest": 1200.0,
-            "newbalanceDest": 186200.0,
-            "status": "PENDING REVIEW"
-        },
-        {
-            "case_id": "TX-9022",
-            "timestamp": "2026-08-25 14:25:44",
-            "type": "PAYMENT",
-            "amount": 420.0,
-            "oldbalanceOrg": 5200.0,
-            "newbalanceOrig": 4780.0,
-            "oldbalanceDest": 0.0,
-            "newbalanceDest": 0.0,
-            "status": "AUTO-APPROVED"
-        },
-        {
-            "case_id": "TX-9023",
-            "timestamp": "2026-08-25 14:29:01",
-            "type": "CASH_OUT",
-            "amount": 94000.0,
-            "oldbalanceOrg": 94000.0,
-            "newbalanceOrig": 0.0,
-            "oldbalanceDest": 450.0,
-            "newbalanceDest": 94450.0,
-            "status": "PENDING REVIEW"
-        }
-    ]
+st.set_page_config(page_title="Fraud Detection", page_icon="🛡️", layout="centered")
 
-# --- APP HEADER ---
-st.title("💼 Analyst Workbench: Case Review & Action Desk")
-st.caption("Investigate flagged transactions, document findings, and execute risk-mitigation actions.")
-st.divider()
 
-# --- 2-COLUMN LAYOUT: INCOMING QUEUE & ACTIVE INVESTIGATION ---
-col_queue, col_detail = st.columns([1, 1.6], gap="large")
+@st.cache_resource(show_spinner="Loading model...")
+def load_model():
+    """Load the model once per server process, not on every interaction."""
+    if NEW_MODEL.exists():
+        meta = json.loads(NEW_META.read_text()) if NEW_META.exists() else {}
+        return joblib.load(NEW_MODEL), meta.get("threshold", LEGACY_THRESHOLD), meta, True
+    if OLD_MODEL.exists():
+        return joblib.load(OLD_MODEL), LEGACY_THRESHOLD, {}, False
+    return None, None, {}, False
 
-# ==========================================
-# LEFT COLUMN: CASE QUEUE SELECTOR
-# ==========================================
-with col_queue:
-    st.subheader("📋 Triage Queue")
-    
-    # Render mini queue selector
-    case_ids = [c["case_id"] for c in st.session_state.cases]
-    selected_case_id = st.radio(
-        "Select Case to Investigate:",
-        options=case_ids,
-        format_func=lambda x: f"{x} — {[c['type'] for c in st.session_state.cases if c['case_id'] == x][0]} (${[c['amount'] for c in st.session_state.cases if c['case_id'] == x][0]:,.0f})"
+
+model, default_threshold, meta, validated = load_model()
+if model is None:
+    st.error("No model file found. Run `python train_model.py --data <csv>` or add the .pkl file.")
+    st.stop()
+
+st.title("Fraud Detection Prediction App")
+st.write("Enter the transaction details to get a fraud risk score.")
+
+with st.sidebar:
+    st.header("Decision threshold")
+    threshold = st.slider(
+        "Flag as fraud when risk is at least",
+        0.05, 0.99, float(round(default_threshold, 3)), 0.01,
+        help="Lower = catch more fraud but more false alarms. Higher = fewer false alarms but more missed fraud.",
     )
-    
-    # Retrieve current active case object
-    active_case = next(c for c in st.session_state.cases if c["case_id"] == selected_case_id)
-    
-    with st.container(border=True):
-        st.markdown(f"**Case ID:** `{active_case['case_id']}`")
-        st.markdown(f"**Status:** `{active_case['status']}`")
-        st.markdown(f"**Ingested At:** `{active_case['timestamp']}`")
-
-    # Fast New Case Injection Form
-    with st.expander("➕ Inject Custom Test Case"):
-        new_id = f"TX-{len(st.session_state.cases) + 9021}"
-        new_type = st.selectbox("Type", ["TRANSFER", "CASH_OUT", "PAYMENT", "DEBIT"], key="inj_type")
-        new_amt = st.number_input("Amount", value=10000.0, key="inj_amt")
-        if st.button("Add to Queue", use_container_width=True):
-            st.session_state.cases.append({
-                "case_id": new_id,
-                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "type": new_type,
-                "amount": new_amt,
-                "oldbalanceOrg": new_amt,
-                "newbalanceOrig": 0.0,
-                "oldbalanceDest": 0.0,
-                "newbalanceDest": new_amt,
-                "status": "PENDING REVIEW"
-            })
-            st.rerun()
-
-# ==========================================
-# RIGHT COLUMN: ACTIVE INVESTIGATION WORKBENCH
-# ==========================================
-with col_detail:
-    st.subheader(f"🔍 Case Details: {active_case['case_id']}")
-    
-    # Preprocess selected case features
-    input_features = pd.DataFrame([{
-        'step': 1,
-        'amount': active_case['amount'],
-        'oldbalanceOrg': active_case['oldbalanceOrg'],
-        'newbalanceOrig': active_case['newbalanceOrig'],
-        'oldbalanceDest': active_case['oldbalanceDest'],
-        'newbalanceDest': active_case['newbalanceDest'],
-        'type_CASH_OUT': 1 if active_case['type'] == "CASH_OUT" else 0,
-        'type_DEBIT': 1 if active_case['type'] == "DEBIT" else 0,
-        'type_PAYMENT': 1 if active_case['type'] == "PAYMENT" else 0,
-        'type_TRANSFER': 1 if active_case['type'] == "TRANSFER" else 0
-    }])
-
-    # Run AI inference
-    if model is not None:
-        prob = model.predict_proba(input_features)[0][1] if hasattr(model, "predict_proba") else 0.5
+    if validated:
+        st.caption(f"Model: {meta.get('model', 'unknown')}. Threshold tuned on a validation set.")
     else:
-        # Calibrated heuristic fallback
-        is_high_risk = active_case['type'] in ["TRANSFER", "CASH_OUT"] and active_case['newbalanceOrig'] == 0
-        prob = 0.96 if is_high_risk else 0.03
+        st.caption(
+            "Legacy model: its default threshold was tuned on the test set, so its "
+            "reported scores are optimistic. Retrain with `train_model.py` for a validated one."
+        )
+    st.caption("Trained on PaySim, a synthetic dataset. Scores here do not reflect real-world accuracy.")
 
-    # Display Live Risk Scorecard
-    with st.container(border=True):
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Transaction Volume", f"${active_case['amount']:,.2f}")
-        m2.metric("Protocol Category", active_case['type'])
-        m3.metric("AI Risk Score", f"{prob * 100:.1f}%")
-        
-        st.progress(float(prob))
-        if prob > 0.70:
-            st.error("⚠️ Threat Alert: Severe anomaly detected (Complete sender account liquidation pattern).")
-        else:
-            st.success("✅ Clean Signature: Balance velocity aligns with standard behavior.")
+with st.form("transaction"):
+    c1, c2 = st.columns(2)
+    transaction_type = c1.selectbox("Transaction type", TRANSACTION_TYPES)
+    step = c2.number_input("Hour of simulation (step)", min_value=1, max_value=743, value=1, step=1,
+                           help="PaySim runs for 743 hourly steps.")
+    amount = c1.number_input("Amount", min_value=0.0, value=1000.0)
+    old_org = c2.number_input("Sender balance before", min_value=0.0, value=0.0)
+    new_org = c1.number_input("Sender balance after", min_value=0.0, value=0.0)
+    old_dest = c2.number_input("Receiver balance before", min_value=0.0, value=0.0)
+    new_dest = c1.number_input("Receiver balance after", min_value=0.0, value=0.0)
+    submitted = st.form_submit_button("Check transaction", type="primary")
 
-    # Ledger Snapshot
-    st.markdown("##### Account Ledger Reconstruction")
-    l1, l2 = st.columns(2)
-    with l1:
-        st.caption("Sender (Origin Node)")
-        st.dataframe(pd.DataFrame({
-            "Metric": ["Pre-Balance", "Post-Balance", "Net Flow"],
-            "Amount": [
-                f"${active_case['oldbalanceOrg']:,.2f}",
-                f"${active_case['newbalanceOrig']:,.2f}",
-                f"-${active_case['oldbalanceOrg'] - active_case['newbalanceOrig']:,.2f}"
-            ]
-        }), hide_index=True, use_container_width=True)
+if submitted:
+    raw = pd.DataFrame([{
+        "step": step, "type": transaction_type, "amount": amount,
+        "oldbalanceOrg": old_org, "newbalanceOrig": new_org,
+        "oldbalanceDest": old_dest, "newbalanceDest": new_dest,
+    }])
+    features = build_features(raw)
+    # Use the exact columns, in the exact order, the model was trained on.
+    expected = getattr(model, "feature_names_in_", None)
+    if expected is not None:
+        features = features.reindex(columns=list(expected), fill_value=0)
 
-    with l2:
-        st.caption("Receiver (Target Node)")
-        st.dataframe(pd.DataFrame({
-            "Metric": ["Pre-Balance", "Post-Balance", "Net Flow"],
-            "Amount": [
-                f"${active_case['oldbalanceDest']:,.2f}",
-                f"${active_case['newbalanceDest']:,.2f}",
-                f"+${active_case['newbalanceDest'] - active_case['oldbalanceDest']:,.2f}"
-            ]
-        }), hide_index=True, use_container_width=True)
+    probability = float(model.predict_proba(features)[0, 1])
+    is_fraud = probability >= threshold
 
-    # Analyst Action Form
-    st.markdown("##### ✍️ Analyst Disposition & Case Resolution")
-    notes = st.text_area("Investigation Notes", placeholder="Enter root cause analysis, phone verification notes, or suspicious IP details...")
-    
-    act1, act2, act3 = st.columns(3)
-    with act1:
-        if st.button("✅ Approve Transaction", use_container_width=True):
-            active_case["status"] = "MANUALLY APPROVED"
-            st.success(f"Case {active_case['case_id']} approved.")
-            st.rerun()
-    with act2:
-        if st.button("🚫 Freeze & Flag Fraud", type="primary", use_container_width=True):
-            active_case["status"] = "CONFIRMED FRAUD / FROZEN"
-            st.error(f"Case {active_case['case_id']} marked as FRAUD.")
-            st.rerun()
-    with act3:
-        if st.button("⚠️ Escalate to Tier 3", use_container_width=True):
-            active_case["status"] = "ESCALATED TO T3"
-            st.warning(f"Case {active_case['case_id']} escalated.")
-            st.rerun()
+    st.divider()
+    left, right = st.columns([1, 2])
+    left.metric("Fraud risk", f"{probability:.1%}")
+    right.progress(min(probability, 1.0), text=f"Flag threshold: {threshold:.0%}")
 
-    # CSV / Report Export
-    report_data = {
-        "Case ID": [active_case["case_id"]],
-        "Timestamp": [active_case["timestamp"]],
-        "Risk Score": [f"{prob*100:.2f}%"],
-        "Final Status": [active_case["status"]],
-        "Analyst Notes": [notes if notes else "N/A"]
-    }
-    report_df = pd.DataFrame(report_data)
-    st.download_button(
-        label="📥 Export Investigation Audit Report (CSV)",
-        data=report_df.to_csv(index=False),
-        file_name=f"audit_report_{active_case['case_id']}.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
+    if is_fraud:
+        st.error(f"This transaction is flagged as **likely fraud** ({probability:.1%} risk).")
+    else:
+        st.success(f"This transaction looks **legitimate** ({probability:.1%} risk).")
+
+    notes = []
+    if transaction_type in ("PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT") and abs(old_org - amount - new_org) > 0.01:
+        notes.append("Sender balances don't add up (before - amount != after).")
+    if old_org > 0 and new_org == 0:
+        notes.append("The sender's account was emptied.")
+    if transaction_type in ("CASH_IN", "DEBIT", "PAYMENT") and amount == 0:
+        notes.append("The amount is zero.")
+    if notes:
+        with st.expander("Signals worth a look"):
+            for n in notes:
+                st.write("- " + n)
+
+    with st.expander("Features sent to the model"):
+        st.dataframe(features.T.rename(columns={0: "value"}), use_container_width=True)
